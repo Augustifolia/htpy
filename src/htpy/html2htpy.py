@@ -207,10 +207,40 @@ class RuffFormatter(Formatter):
 
 
 class HTPYParser(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, django) -> None:
         self._collected: list[Tag | str] = []
         self._current: Tag | None = None
+        self._blocks = []  # store django block tags to make sure the html parser does not modify them
+        self._django = django
         super().__init__()
+
+    def feed(self, data):
+        from django.template import base
+        if self._django:
+            lexer = base.Lexer(data)
+            tokens = lexer.tokenize()
+
+            cleaned_data = []
+            index = 0
+            for token in tokens:
+                contents = token.contents
+                if token.token_type == base.TokenType.COMMENT:
+                    contents = "{# " + contents + " #}"
+                elif token.token_type == base.TokenType.TEXT:
+                    pass
+                elif token.token_type == base.TokenType.VAR:
+                    contents = "{{ " + contents + " }}"
+                elif token.token_type == base.TokenType.BLOCK:
+                    self._blocks.append(contents)
+                    contents = f"{{%{index}%}}"
+                    index += 1
+
+                cleaned_data.append(contents)
+
+            data = "".join(cleaned_data)
+
+        super().feed(data)
+
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = Tag(tag, dict(attrs), parent=self._current)
@@ -294,10 +324,166 @@ class HTPYParser(HTMLParser):
                 o += _serialize(t, shorthand_id_class, use_h_prefix) + ","
             o = o[:-1] + "]"
 
+        if self._django:
+            # reinsert django block tags
+            for index, block in enumerate(self._blocks):
+                o = o.replace(f"{{%{index}%}}", f"{{% {block} %}}")
+
+            o = template2htpy(o)
+
         if formatter:
             return formatter.format(o)
         else:
             return o
+
+
+def handle_filters(string: str, add_imports: set, _default_filters: list) -> str:
+    if "|" not in string:
+        return string
+
+    start, end = string.split("|")
+    parts = end.split(":", 1)
+    if parts[0] in _default_filters:
+        add_imports.add(f"from django.template.defaultfilters import {parts[0]}\n")
+        string = f"{parts[0]}({start}{", " + ", ".join(parts[1:]) if len(parts) > 1 else ""})"
+
+    return string
+
+
+def template_parser(tokens: list):
+    from django.template import base
+    from django.template import defaultfilters
+    from inspect import getmembers, isfunction
+    functions_list = getmembers(defaultfilters, isfunction)
+    _default_filters = [function[0] for function in functions_list if not function[0].startswith("_")]
+    parsed: list[str] = []
+    if_list = []
+    for_list = []
+    add_imports = set()
+    strip_surrounding = False
+    strip_surrounding_quote = False
+    for token in tokens:
+        contents: str = token.contents
+        if token.token_type == base.TokenType.VAR:
+            contents = contents.replace('\\"', '"')
+            contents = handle_filters(contents, add_imports, _default_filters)
+            contents = "{" + contents + "}"
+            last_parsed = parsed.pop()
+            parts = last_parsed.rsplit('"', 1)
+            if len(parts) == 2 and not parts[0].endswith("f"):
+                parts[0] += 'f"'
+                parsed.append(parts[0] + parts[1])
+            else:
+                parsed.append(parts[0])
+
+        elif token.token_type == base.TokenType.COMMENT:
+            contents = "#" + contents + "\n"
+            strip_surrounding_quote = True
+        elif token.token_type == base.TokenType.TEXT:
+            if strip_surrounding:
+                contents = contents.lstrip('", ')
+                strip_surrounding = False
+
+            if strip_surrounding_quote:
+                contents = contents.lstrip('" ')
+                strip_surrounding_quote = False
+
+        elif token.token_type == base.TokenType.BLOCK:
+            contents = handle_filters(contents, add_imports, _default_filters)
+            if contents.startswith("if "):
+                if_list.append(["if", contents])
+                contents = "("
+                strip_surrounding = True
+
+            elif contents.startswith("elif "):
+                if_start = if_list.pop()
+                if_list.append(["elif", contents])
+                contents = f') {if_start[1]} else ('
+                strip_surrounding = True
+
+            elif contents == "else":
+                if_start = if_list.pop()
+                if_list.append(["else", contents])
+                contents = f') {if_start[1].removeprefix("el")} else ('
+                strip_surrounding = True
+
+            elif contents == "endif":
+                if_start = if_list.pop()
+                if if_start[0] == "else":
+                    contents = "),"
+                else:
+                    contents = f') {if_start[1].removeprefix("el")} else "",'
+                strip_surrounding = True
+
+            elif contents.startswith("for "):
+                for_list.append(contents)
+                contents = "("
+                strip_surrounding = True
+
+            elif contents == "endfor":
+                for_start = for_list.pop()
+                contents = f' {for_start}),'
+                strip_surrounding = True
+
+            elif contents.startswith("url "):
+                add_imports.add("from django.urls import reverse\n")
+                parts = contents.split()
+                args = ""
+                if len(parts) > 2:
+                    args = f", args={str(parts[2:]).replace("'", "")}"
+                contents = f'reverse({parts[1]}{args})'
+                strip_surrounding_quote = True
+
+            elif contents.startswith("static "):
+                add_imports.add("from django.templatetags.static import static\n")
+                parts = contents.split()
+                args = ""
+                if len(parts) > 2:
+                    args = f", args={str(parts[2:]).replace("'", "")}"
+                contents = f'static({parts[1]}{args})'
+                strip_surrounding_quote = True
+
+            elif contents.startswith("now "):
+                args = contents.removeprefix("now ")
+                add_imports.add("from django.template.defaultfilters import date\n")
+                add_imports.add("from datetime import datetime\n")
+                add_imports.add("from django.utils import timezone\n")
+                add_imports.add("from django.conf import settings\n")
+                contents = f"date(datetime.now(tz=timezone.get_current_timezone() if settings.USE_TZ else None), {args})"
+
+            elif contents == "csrf_token":
+                contents = f"csrf.get_token(request),"
+                add_imports.add("from django.middleware import csrf\n")
+                strip_surrounding_quote = True
+
+            else:  # some block that we don't know how to handle
+                contents = "{{% " + contents + " %}}"
+
+        if strip_surrounding:
+            last_parsed = parsed.pop()
+            last_parsed = last_parsed.rstrip('", ')
+            parsed.append(last_parsed)
+
+        if strip_surrounding_quote:
+            last_parsed = parsed.pop()
+            last_parsed = last_parsed.rstrip('" ')
+            parsed.append(last_parsed)
+
+        parsed.append(contents)
+
+    parsed = list(add_imports) + parsed
+
+    return parsed
+
+
+def template2htpy(string: str) -> str:
+    from django.template import base
+    string = string.replace("{{%", "{%").replace("%}}", "%}")
+    lexer = base.Lexer(string)
+    tokens = lexer.tokenize()
+    parsed = template_parser(tokens)
+
+    return "".join(parsed)
 
 
 def html2htpy(
@@ -305,8 +491,9 @@ def html2htpy(
     shorthand_id_class: bool = True,
     import_mode: t.Literal["yes", "h", "no"] = "yes",
     formatter: Formatter | None = None,
+    django: bool = False,
 ) -> str:
-    parser = HTPYParser()
+    parser = HTPYParser(django)
     parser.feed(html)
 
     return parser.serialize_python(shorthand_id_class, import_mode, formatter)
@@ -396,6 +583,23 @@ def _serialize(el: Tag | str, shorthand_id_class: bool, use_h_prefix: bool) -> s
         return str(el)
 
 
+def _handle_templates(template):
+    if template == "auto":
+        django = True
+        try:
+            from django.template import base
+        except ImportError:
+            django = False
+    elif template == "django":
+        django = True
+    elif template == "none":
+        django = False
+    else:
+        django = False
+
+    return django
+
+
 def _get_formatter(format: t.Literal["auto", "ruff", "black", "none"]) -> Formatter | None:
     if format == "ruff":
         if _is_command_available("ruff"):
@@ -464,6 +668,27 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "-t",
+        "--template",
+        choices=["auto", "django", "none"],
+        default="auto",
+        help=textwrap.dedent(
+            """
+            Translate some django template tags to python.
+
+            auto (default):
+              - If django is installed, use `django` to handle template tags.
+              - If django is not installed, do not handle django template tags.
+
+            django:
+              Handle django template tags.
+
+            none:
+              Do not handle django template tags.
+        """,
+        ),
+    )
+    parser.add_argument(
         "-i",
         "--imports",
         choices=["yes", "h", "no"],
@@ -511,7 +736,9 @@ def main() -> None:
 
     formatter = _get_formatter(args.format)
 
-    print(html2htpy(input, shorthand, imports, formatter))
+    django = _handle_templates(args.template)
+
+    print(html2htpy(input, shorthand, imports, formatter, django))
 
 
 def _printerr(value: str) -> None:
