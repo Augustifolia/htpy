@@ -360,9 +360,11 @@ def template_parser(tokens: list):
     if_list = []
     for_list = []
     add_imports = set()
+    inline_if = False
     strip_surrounding = False
     strip_surrounding_quote = False
-    for token in tokens:
+    strip_next_comma = False
+    for index, token in enumerate(tokens):
         contents: str = token.contents
         if token.token_type == base.TokenType.VAR:
             contents = contents.replace('\\"', '"')
@@ -379,6 +381,7 @@ def template_parser(tokens: list):
         elif token.token_type == base.TokenType.COMMENT:
             contents = "#" + contents + "\n"
             strip_surrounding_quote = True
+            strip_next_comma = True
         elif token.token_type == base.TokenType.TEXT:
             if strip_surrounding:
                 contents = contents.lstrip('", ')
@@ -388,32 +391,60 @@ def template_parser(tokens: list):
                 contents = contents.lstrip('" ')
                 strip_surrounding_quote = False
 
+            if strip_next_comma:
+                contents = contents.lstrip(",")
+                strip_next_comma = False
+
         elif token.token_type == base.TokenType.BLOCK:
             contents = handle_filters(contents, add_imports, _default_filters)
             if contents.startswith("if "):
                 if_list.append(["if", contents])
-                contents = "("
-                strip_surrounding = True
+                _last: str = parsed[-1]
+                _next: str = tokens[index+1].contents
+
+                if _last.strip().endswith('"') or _next.strip().startswith('"'):
+                    contents = "("
+                    strip_surrounding = True
+                else:
+                    if '"' in _last:
+                        start, end = _last.rsplit('"', 1)
+                        _last = start + 'f"' + end
+                        parsed[-1] = _last
+                    contents = '{"'
+                    inline_if = True
 
             elif contents.startswith("elif "):
                 if_start = if_list.pop()
                 if_list.append(["elif", contents])
-                contents = f') {if_start[1]} else ('
+                if inline_if:
+                    contents = f'" {if_start[1]} else "'
+                else:
+                    contents = f') {if_start[1]} else ('
                 strip_surrounding = True
 
             elif contents == "else":
                 if_start = if_list.pop()
                 if_list.append(["else", contents])
-                contents = f') {if_start[1].removeprefix("el")} else ('
+                if inline_if:
+                    contents = f'" {if_start[1].removeprefix("el")} else "'
+                else:
+                    contents = f') {if_start[1].removeprefix("el")} else ('
                 strip_surrounding = True
 
             elif contents == "endif":
                 if_start = if_list.pop()
-                if if_start[0] == "else":
-                    contents = "),"
+                if inline_if:
+                    if if_start[0] == "else":
+                        contents = '"}'  # just a normal ending
+                    else:
+                        contents = f'" {if_start[1].removeprefix("el")} else ""}}'
                 else:
-                    contents = f') {if_start[1].removeprefix("el")} else "",'
-                strip_surrounding = True
+                    if if_start[0] == "else":
+                        contents = "),"  # just a normal ending
+                    else:
+                        contents = f') {if_start[1].removeprefix("el")} else "",'  # handle if and elif
+                    strip_surrounding = True
+                inline_if = False
 
             elif contents.startswith("for "):
                 for_list.append(contents)
@@ -450,6 +481,7 @@ def template_parser(tokens: list):
                 add_imports.add("from django.utils import timezone\n")
                 add_imports.add("from django.conf import settings\n")
                 contents = f"date(datetime.now(tz=timezone.get_current_timezone() if settings.USE_TZ else None), {args})"
+                strip_surrounding_quote = True
 
             elif contents == "csrf_token":
                 contents = f"csrf.get_token(request),"
@@ -483,7 +515,10 @@ def template2htpy(string: str) -> str:
     tokens = lexer.tokenize()
     parsed = template_parser(tokens)
 
-    return "".join(parsed)
+    joined = "".join(parsed)
+    joined = joined.replace(",,", ",")
+
+    return joined
 
 
 def html2htpy(
