@@ -341,11 +341,26 @@ def handle_filters(string: str, add_imports: set, _default_filters: list) -> str
     if "|" not in string:
         return string
 
-    start, end = string.split("|")
+    start, end = string.rsplit("|", 1)
     parts = end.split(":", 1)
     if parts[0] in _default_filters:
+        start = handle_filters(start, add_imports, _default_filters)
         add_imports.add(f"from django.template.defaultfilters import {parts[0]}\n")
         string = f"{parts[0]}({start}{", " + ", ".join(parts[1:]) if len(parts) > 1 else ""})"
+
+    return string
+
+
+def handle_f_string(string: str) -> str:
+    parts = string.rsplit('"', 1)
+    if len(parts) == 2:
+        if parts[0].rstrip('"').endswith("f"):
+            string = parts[0] + '"' + parts[1]
+
+        else:
+            string = parts[0] + 'f"' + parts[1]
+    else:
+        string = parts[0]
 
     return string
 
@@ -361,6 +376,7 @@ def template_parser(tokens: list):
     for_list = []
     add_imports = set()
     inline_if = False
+    in_comment = False
     strip_surrounding = False
     strip_surrounding_quote = False
     strip_next_comma = False
@@ -371,12 +387,7 @@ def template_parser(tokens: list):
             contents = handle_filters(contents, add_imports, _default_filters)
             contents = "{" + contents + "}"
             last_parsed = parsed.pop()
-            parts = last_parsed.rsplit('"', 1)
-            if len(parts) == 2 and not parts[0].endswith("f"):
-                parts[0] += 'f"'
-                parsed.append(parts[0] + parts[1])
-            else:
-                parsed.append(parts[0])
+            parsed.append(handle_f_string(last_parsed))
 
         elif token.token_type == base.TokenType.COMMENT:
             contents = "#" + contents + "\n"
@@ -404,12 +415,10 @@ def template_parser(tokens: list):
 
                 if _last.strip().endswith('"') or _next.strip().startswith('"'):
                     contents = "("
-                    strip_surrounding = True
+                    strip_surrounding_quote = True
+                    strip_next_comma = True
                 else:
-                    if '"' in _last:
-                        start, end = _last.rsplit('"', 1)
-                        _last = start + 'f"' + end
-                        parsed[-1] = _last
+                    parsed[-1] = handle_f_string(_last)
                     contents = '{"'
                     inline_if = True
 
@@ -488,6 +497,14 @@ def template_parser(tokens: list):
                 add_imports.add("from django.middleware import csrf\n")
                 strip_surrounding_quote = True
 
+            elif contents == "comment":
+                in_comment = True
+                contents = ""
+
+            elif contents == "endcomment":
+                in_comment = False
+                contents = ""
+
             else:  # some block that we don't know how to handle
                 contents = "{{% " + contents + " %}}"
 
@@ -500,6 +517,9 @@ def template_parser(tokens: list):
             last_parsed = parsed.pop()
             last_parsed = last_parsed.rstrip('" ')
             parsed.append(last_parsed)
+
+        if in_comment and contents != "":
+            contents = f"# {contents.replace("\n", "\n# ")} \n"
 
         parsed.append(contents)
 
