@@ -355,3 +355,219 @@ def test_convert_pre_element_retains_all_whitespace() -> None:
 
         This   element   retains   newlines   and   whitespace."""]'''
     )
+
+
+def test_convert_django_template_for_loop() -> None:
+    actual = html2htpy(
+        """
+        <div>
+            {% for item in items %}
+                <p>hi {{ item }}</p>
+            {% endfor %}
+        </div>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert actual == 'div[(p[f"hi {item}"] for item in items),]\n'
+
+
+def test_convert_django_template_nested_for_loop() -> None:
+    actual = html2htpy(
+        """
+        <div>
+            {% for item in items %}
+                {% for i in item %}
+                    <p>hi {{ i }}</p>
+                {% endfor %}
+            {% endfor %}
+        </div>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert actual == 'div[((p[f"hi {i}"] for i in item) for item in items),]\n'
+
+
+def test_convert_django_template_if() -> None:
+    actual = html2htpy(
+        """
+        <div>
+            {% if state %}
+                <p>hi {{ item }}</p>
+            {% endif %}
+        </div>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert actual == 'div[(p[f"hi {item}"]) if state else "",]\n'
+
+
+def test_convert_django_template_elif() -> None:
+    actual = html2htpy(
+        """
+        <div>
+            {% if state == 0 %}
+                <p>hi {{ egg }}</p>
+            {% elif state == 1 %}
+                <p>hi {{ spam }}</p>
+            {% endif %}
+        </div>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert (
+        actual
+        == 'div[(p[f"hi {egg}"]) if state == 0 else (p[f"hi {spam}"]) if state == 1 else "",]\n'
+    )
+
+
+def test_convert_django_template_inline_if() -> None:
+    actual = html2htpy(
+        """
+        <div class="egg {% if state %}spam{% endif %}">
+            <p>hi {{ item }}</p>
+        </div>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert actual == "div(f\".egg.{'spam' if state else ''}\")[p[f\"hi {item}\"]]\n"
+
+
+def test_convert_django_template_url() -> None:
+    actual = html2htpy(
+        """
+        <a href="{% url "move_spam"  %}">Add spam</a>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert actual == textwrap.dedent("""\
+    from django.urls import reverse
+
+    a(href=reverse("move_spam"))["Add spam"]
+    """)
+
+
+def test_convert_django_template_static() -> None:
+    actual = html2htpy(
+        """
+        <script type="text/javascript" src="{% static "egg.js" %}"></script>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert actual == textwrap.dedent("""\
+    from django.templatetags.static import static
+
+    script(type="text/javascript", src=static("egg.js"))
+    """)
+
+
+def test_convert_django_template_csrf() -> None:
+    actual = html2htpy(
+        """
+        <form method="post">
+            {% csrf_token %}
+        </form>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert actual == textwrap.dedent("""\
+    from django.middleware import csrf
+
+    form(method="post")[csrf.get_token(request),]
+    """)
+
+
+def test_convert_django_template_comments() -> None:
+    actual = html2htpy(
+        """
+        <div>
+            {# inline comment #}
+            <p>egg</p>
+            {% comment %} multiline comment
+            <div>
+                <p>bacon</p>
+                {% if state %}
+                    <p>egg</p>
+                {% endif %}
+                <p>spam</p>
+            </div>
+            {% endcomment %}
+        </div>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert (
+        actual
+        == """\
+div[  # inline comment
+    p["egg"],  # multiline comment", div[p["bacon"], "
+    # (
+    #  p["egg"], "
+    # ) if state else "",
+    # p["spam"]], "
+]\n"""
+    )
+
+
+def test_convert_django_template_filters() -> None:
+    actual = html2htpy(
+        """
+        <div>
+            {{ value|add: "2" }}
+        </div>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert actual == textwrap.dedent("""\
+    from django.template.defaultfilters import add
+
+    div[f" {add(value, '2')}"]
+    """)
+
+
+def test_convert_django_template_filters2() -> None:
+    actual = html2htpy(
+        """
+        <div>
+            {{ value|lower }}
+        </div>
+        """,
+        import_mode="no",
+        django=True,
+        formatter=RuffFormatter(),
+    )
+
+    assert actual == textwrap.dedent("""\
+    from django.template.defaultfilters import lower
+
+    div[f" {lower(value)}"]
+    """)
