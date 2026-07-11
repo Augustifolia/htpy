@@ -450,7 +450,7 @@ def test_convert_django_template_inline_if() -> None:
 def test_convert_django_template_url() -> None:
     actual = html2htpy(
         """
-        <a href="{% url "move_spam"  %}">Add spam</a>
+        <a href="{% url "move_spam" %}">Add spam</a>
         """,
         import_mode="no",
         django=True,

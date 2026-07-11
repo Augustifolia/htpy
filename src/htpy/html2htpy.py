@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import importlib
+import importlib.util
 import keyword
 import re
 import shutil
@@ -744,17 +744,17 @@ def main() -> None:
         default="auto",
         help=textwrap.dedent(
             """
-            Translate some django template tags to python.
+            Convert django template syntax to python.
 
             auto (default):
-              - If django is installed, use `django` to handle template tags.
-              - If django is not installed, do not handle django template tags.
+              - If django is installed, use `django` to handle template syntax.
+              - If django is not installed, do not handle django template syntax.
 
             django:
-              Handle django template tags.
+              Handle django template syntax.
 
             none:
-              Do not handle django template tags.
+              Do not handle django template syntax.
         """,
         ),
     )
