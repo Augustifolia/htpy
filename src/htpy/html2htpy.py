@@ -505,15 +505,6 @@ def template2htpy(string: str) -> str:
                 contents = f"static({parts[1]}{args})"
                 strip_surrounding_quote = True
 
-            elif contents.startswith("now "):
-                args = contents.removeprefix("now ")
-                add_imports.add("from django.template.defaultfilters import date\n")
-                add_imports.add("from datetime import datetime\n")
-                add_imports.add("from django.utils import timezone\n")
-                add_imports.add("from django.conf import settings\n")
-                contents = f"date(datetime.now(tz=timezone.get_current_timezone() if settings.USE_TZ else None), {args})"  # noqa
-                strip_surrounding_quote = True
-
             elif contents == "csrf_token":
                 contents = "csrf.get_token(request),"
                 add_imports.add("from django.middleware import csrf\n")
